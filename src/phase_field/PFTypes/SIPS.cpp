@@ -35,11 +35,13 @@ SIPS::SIPS(const CommonParams& pin,
     bx = input_params("PFApp/bx",0);
 	 by = input_params("PFApp/by",1);
 	 bz = input_params("PFApp/bz",1);
+    mobilityDamper = input_params("PFApp/mobilityDamper",0);
     NSdepth = input_params("PFApp/NSdepth",0); 
     deli = (nz+2)*(ny+2);
 	 delj = (nz+2);
 	 delk = 1;
     co = input_params("PFApp/co",0.1);
+    water_CB = input_params("PFApp/water_CB",1.0);
     chiPS = input_params("PFApp/chiPS",0.034);
     chiPN = input_params("PFApp/chiPN",2.5);
     chiCond = input_params("PFApp/chiCond",1.0);
@@ -51,8 +53,9 @@ SIPS::SIPS(const CommonParams& pin,
     Tinit = input_params("PFApp/Tinit",273.15);
     noiseStr = input_params("PFApp/noiseStr",0.1);
     D0 = input_params("PFApp/D0", 1.0);
+    gamma = input_params("PFApp/gamma", 1.0);
     nu = input_params("PFApp/nu",1.0);
-    gamma = input_params("PFApp/gamma", 10.0);
+    mobReSize = input_params("PFApp/mobReSize",1.0);
     Mweight = input_params("PFApp/Mweight",100.0);
     Mvolume = input_params("PFApp/Mvolume",0.1);
     
@@ -97,7 +100,7 @@ void SIPS::initPhaseField()
                     //nVal = 0.0; 
                     //sVal = 1.0 - val - nVal;
                     c.setValue(ndx,val);
-                    //n.setValue(ndx,nVal);
+                    n.setValue(ndx,0.0);
                     //s.setValue(ndx,sVal);
                 }           
                 else {                    // initializing water bath
@@ -105,7 +108,7 @@ void SIPS::initPhaseField()
                     //nVal = 1.0;
                     //sVal = 1.0 - val - nVal;
                     c.setValue(ndx,val);
-                    //n.setValue(ndx,nVal);
+                    n.setValue(ndx,water_CB);
                     //s.setValue(ndx,sVal);
                 } 
             } 
@@ -147,7 +150,8 @@ void SIPS::updatePhaseField()
     double ddf_c = 1.0;
     double ddf_n = 1.0;
     double ddf_s = 1.0;
-    double chiPS_diff = chiPS;
+    double water_diff = 0.0;
+    double chiPS_diff = 0.0;
     double r = 1/N; // ratio of molar volumes of V_1/V_3 (V_n/V_p)
     double s_ratio = 1.0; // ratio of molar volumes of V_1/V_1 (V_n/V_s)
     SfieldFD mu_c(p);
@@ -163,15 +167,18 @@ void SIPS::updatePhaseField()
  		  double T = Tinit; 
  		  double kT = T/273.0;
  		  if (waterD >= NSdepth) {
-            chiPS_diff = (chiPS-chiPN)*erf((i + p.xOff)/(2.0*sqrt(chiCond*double(current_step)*dt)))+chiPN;
+            water_diff = (water_CB-0.0)*erfc((i + p.xOff)/(2.0*sqrt(chiCond*double(current_step)*dt)))+ 0.0;
+            chiPS_diff = chiPN*water_diff + chiPS*(1.0-water_diff);
         }
         else if (waterD < NSdepth) { 
+            water_diff = 0.0;
             chiPS_diff = chiPN;
         } 
         for (int j=1; j<ny+1; j++) {
             for (int k=1; k<nz+1; k++) {
                 int ndx = i*deli + j*delj + k*delk;
                 chi.setValue(ndx,chiPS_diff);
+                n.setValue(ndx,water_diff);
                 double cc = c.getValue(ndx);
                 double cc_fh = 0.0;  
                 cc_fh = getFHcc(cc);	
@@ -187,7 +194,7 @@ void SIPS::updatePhaseField()
                 // polymer self diffusion (Phillies) and 2nd Derivative FH
                 // --------------------------------------------------------
 		          double cc_phil = philliesDiffusion(cc);
-                double ddf_c = secondDerFH(cc);		          
+                double ddf_c = secondDerFH(cc);	
 	             ddf_c *= kT;
                 Dc = D0;
 				    double Dp = Dc * exp (- gamma * pow(cc_phil,nu));	
@@ -195,15 +202,22 @@ void SIPS::updatePhaseField()
                 // mobility
                 // ----------------------
                 double Mc = Dp/ddf_c;
-                double chiFraction = (chiPS_diff-chiPS)/(chiPN - chiPS);
-                double mobScale = 0.95 + 0.25 * log(1.0225 - chiFraction);
+                //
+                // removing artifical mobility scaling
+                //
+                double waterFraction = (water_diff)/(water_CB);
+                // double chiFraction = (chiPS_diff-chiPS)/(chiPN - chiPS);
+               // double mobScale = 0.95 + 0.25 * log(1.0225 - chiFraction); // log scaling
+                double waterScale = 0.95 + 0.25*log(1.0225 - waterFraction);  
+                // polymer concentration causing vitrification?
+                // if (cc >= 0.75) 
+                //double mobScale = 1.0 - chiFraction; // linear scaling
                 if (Mc > 1.0) Mc = 1.0;     // making mobility max = 1
-   	          else if (Mc< 0.00001) Mc = 0.00001; // mobility min = 0.00001 till phicutoff
-	             Mc *= mobScale;              
-                /* if (phiCutoff < cc) Mc *= 0.001;
-                if (Mc < 0.000001) Mc = 0.000001;
-                if (Mc > D0) Mc = D0; 
-                if (cc > phiCutoff) Mc *= 0.001;*/
+   	          else if (Mc < 0.0) Mc = 1e-12;
+	             Mc *= mobReSize;//*waterScale;
+                if (mobilityDamper == 1) Mc *= waterScale;
+	             // Mc *= mobScale;
+                if (cc >= phiCutoff) Mc *= 1e-3;
                 mob_c.setValue(ndx,Mc);
             }
         }
@@ -226,8 +240,8 @@ void SIPS::updatePhaseField()
     // ---------------------------------------
     // Add random fluctuations:
     // ---------------------------------------
-	 waterD = 0;   
-	 double c_check = 0.0;
+	 //waterD = 0;   
+	 //double c_check = 0.0;
 	 double val = 0.0;
     for (int i=1; i<nx+1; i++) {
         //waterD = i + p.xOff - 1;    // counter for water depth
@@ -236,8 +250,12 @@ void SIPS::updatePhaseField()
                 int ndx = i*deli + j*delj + k*delk;
                 double r = (double)rand()/RAND_MAX;
                 double c_check = c.getValue(ndx);
-                if (c_check >= phiCutoff) val = 0.0;
-                else if (c_check < phiCutoff) val = noiseStr*(r-0.5);
+                if (c_check < 0) val =0;
+                else if (c_check >= phiCutoff) val = 0;
+                else val = c_check*(phiCutoff - c_check)*noiseStr*(r-0.5);
+                //val *= noiseStr*(r-0.5);   
+                //if (c_check >= 1.0) val = 0.0;
+                /*else if (c_check < phiCutoff)*/
                 //if (waterD > NSdepth) c.addValue(ndx,p.dt*val); 
                 // ¡¡¡nan issue!!! 
                 // dont want noise added to water bath...
@@ -254,7 +272,7 @@ void SIPS::updatePhaseField()
 double SIPS::getFHcc(double cc)
 {
 	double cc_fh = 0.0;
-	if (cc < 0.0) { cc_fh = 0.001; }
+	if (cc < 0.0) { cc_fh = 0.000001; }
 	else if (cc > 1.0) { cc_fh = 0.999; }
 	else { cc_fh = cc; }
 	return cc_fh;
@@ -277,10 +295,12 @@ double SIPS::philliesDiffusion(double cc)
 // --------------------------------------------------------
 // 2nd Derivative FH with phillies concentration
 // --------------------------------------------------------
-double SIPS::secondDerFH(double cc_fh)
+double SIPS::secondDerFH(double cc)
 {
 	double ddf_c = 0.0;
-	ddf_c = 0.5* (1.0/(N*cc_fh) + 1.0/(1.0-cc_fh)); 
+	if (cc < 0.0) ddf_c = 0.75*A*pow(-cc,-0.5);
+	else if (cc == 0.0) ddf_c = 1e3;
+	else ddf_c = 0.5* (1.0/(N*cc) + 1.0/(1.0-cc)); 
 	return ddf_c;
 }
 
@@ -295,6 +315,6 @@ void SIPS::outputPhaseField()
     int jskip = p.jskip;
     int kskip = p.kskip;
     c.writeVTKFile("c",current_step,iskip,jskip,kskip);
-    // chi.writeVTKFile("chi",current_step,iskip,jskip,kskip);
-    // s.writeVTKFile("s",current_step,iskip,jskip,kskip);
+//    chi.writeVTKFile("chi",current_step,iskip,jskip,kskip);
+//    n.writeVTKFile("n",current_step,iskip,jskip,kskip);
 }

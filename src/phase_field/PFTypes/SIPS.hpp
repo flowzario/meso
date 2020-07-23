@@ -37,6 +37,7 @@ private:
     double dt;
     double co;
     double chiCond;
+    double water_CB;
     double phiCutoff;
     double chiPS;
     double chiPN;
@@ -49,12 +50,14 @@ private:
     double Tcrystal;
     double noiseStr;
     double thermCond;
-    double nu;
     double gamma;
+    double nu;
     double D0;
     double Mweight;
     double Mvolume;
+    double mobReSize;
     bool bx,by,bz;
+    bool mobilityDamper;
 public:
 
     SIPS(const CommonParams&, const GetPot&);
