@@ -20,7 +20,7 @@
 // -------------------------------------------------------------------------
 
 SIPS::SIPS(const CommonParams& pin,
-                   const GetPot& input_params) : p(pin), c(p), s(p), n(p), chi(p)
+                   const GetPot& input_params) : p(pin), c(p), w(p)
 {
 
     // ---------------------------------------
@@ -33,18 +33,15 @@ SIPS::SIPS(const CommonParams& pin,
     nz = p.nz;
     dt = p.dt;
     bx = input_params("PFApp/bx",0);
-	 by = input_params("PFApp/by",1);
-	 bz = input_params("PFApp/bz",1);
-    mobilityDamper = input_params("PFApp/mobilityDamper",0);
-    NSdepth = input_params("PFApp/NSdepth",0); 
+    by = input_params("PFApp/by",1);
+	bz = input_params("PFApp/bz",1);
     deli = (nz+2)*(ny+2);
-	 delj = (nz+2);
-	 delk = 1;
+	delj = (nz+2);
+	delk = 1;
     co = input_params("PFApp/co",0.1);
     water_CB = input_params("PFApp/water_CB",1.0);
     chiPS = input_params("PFApp/chiPS",0.034);
     chiPN = input_params("PFApp/chiPN",2.5);
-    chiCond = input_params("PFApp/chiCond",1.0);
     phiCutoff = input_params("PFApp/phiCutoff",0.5);
     M = input_params("PFApp/M",1.0);
     kap = input_params("PFApp/kap",1.0);
@@ -53,8 +50,11 @@ SIPS::SIPS(const CommonParams& pin,
     Tinit = input_params("PFApp/Tinit",273.15);
     noiseStr = input_params("PFApp/noiseStr",0.1);
     D0 = input_params("PFApp/D0", 1.0);
+    DNS = input_params("PFApp/DNS",10.0);
     gamma = input_params("PFApp/gamma", 1.0);
     nu = input_params("PFApp/nu",1.0);
+    gammaNS = input_params("PFApp/gammaNS",1.0);
+    nuNS = input_params("PFApp/nuNS,",1.0);
     mobReSize = input_params("PFApp/mobReSize",1.0);
     Mweight = input_params("PFApp/Mweight",100.0);
     Mvolume = input_params("PFApp/Mvolume",0.1);
@@ -84,36 +84,20 @@ void SIPS::initPhaseField()
     //	---------------------------------------
     // initialize the concentration field:
     //	---------------------------------------
-    int waterD = 0;                 // initialize counter
     srand(time(NULL)*(p.rank+1));   // set the random seed
     for (int i=1; i<nx+1; i++) {
-    	  waterD = i + p.xOff - 1;    // NSdepth counter (water) (1)
+    	  //waterD = i + p.xOff - 1;    // NSdepth counter (water) (1)
         for (int j=1; j<ny+1; j++) {
             for (int k=1; k<nz+1; k++) {
                 int ndx = i*deli + j*delj + k*delk;
                 double r = (double)rand()/RAND_MAX;
                 double val = 0.0;
-                //double nVal = 0.0;
-                //double sVal = 0.0;
-                if (waterD >= NSdepth) {  // initializing polymer/solvent sol.
-                    val = co + 0.1*(r-0.5);  
-                    //nVal = 0.0; 
-                    //sVal = 1.0 - val - nVal;
-                    c.setValue(ndx,val);
-                    n.setValue(ndx,0.0);
-                    //s.setValue(ndx,sVal);
-                }           
-                else {                    // initializing water bath
-                    val = 0.0; 
-                    //nVal = 1.0;
-                    //sVal = 1.0 - val - nVal;
-                    c.setValue(ndx,val);
-                    n.setValue(ndx,water_CB);
-                    //s.setValue(ndx,sVal);
-                } 
-            } 
-        }
-    }
+                val = co + noiseStr*(r-0.5);  
+                c.setValue(ndx,val);
+                w.setValue(ndx,0.0);
+            }
+        } 
+    } 
 
     //	---------------------------------------
     // Output the initial configuration:
@@ -138,86 +122,59 @@ void SIPS::updatePhaseField()
     // ---------------------------------------
 
     c.updateBoundaries(bx,by,bz);
-    // n.updateBoundaries(bx,by,bz);
-    // s.updateBoundaries(bx,by,bz);
+    w.updateBoundaries(bx,by,bz);
     MPI::COMM_WORLD.Barrier();
     // ----------------------------------------
     // initializing variables
     // ----------------------------------------
-    double Dc = 1.0;      // polymer diffusion
-    double Dn = 1.0;      // nonsolvent diffusion
-    double Ds = 1.0;            // solvent diffusion
-    double ddf_c = 1.0;
-    double ddf_n = 1.0;
-    double ddf_s = 1.0;
-    double water_diff = 0.0;
-    double chiPS_diff = 0.0;
-    double r = 1/N; // ratio of molar volumes of V_1/V_3 (V_n/V_p)
-    double s_ratio = 1.0; // ratio of molar volumes of V_1/V_1 (V_n/V_s)
     SfieldFD mu_c(p);
     SfieldFD mob_c(p);
-    // SfieldFD mu_n(p);
-    // SfieldFD mob_n(p);
-    // SfieldFD mu_s(p);
-    // SfieldFD mob_s(p);
-
-    int waterD = 0;
+    SfieldFD mu_w(p);
+    SfieldFD D_w(p);
+    double chi = 0.0;
     for (int i=1; i<nx+1; i++) {
-    	  waterD = i + p.xOff - 1;         
- 		  double T = Tinit; 
- 		  double kT = T/273.0;
- 		  if (waterD >= NSdepth) {
-            water_diff = (water_CB-0.0)*erfc((i + p.xOff)/(2.0*sqrt(chiCond*double(current_step)*dt)))+ 0.0;
-            chiPS_diff = chiPN*water_diff + chiPS*(1.0-water_diff);
-        }
-        else if (waterD < NSdepth) { 
-            water_diff = 0.0;
-            chiPS_diff = chiPN;
-        } 
+        double T = Tinit; 
+ 		double kT = T/273.0;
         for (int j=1; j<ny+1; j++) {
             for (int k=1; k<nz+1; k++) {
                 int ndx = i*deli + j*delj + k*delk;
-                chi.setValue(ndx,chiPS_diff);
-                n.setValue(ndx,water_diff);
+                if (i==1) w.setValue(ndx,water_CB);
                 double cc = c.getValue(ndx);
+                double ww = w.getValue(ndx);
                 double cc_fh = 0.0;  
-                cc_fh = getFHcc(cc);	
+                cc_fh = getFHcc(cc);
+                // calculate chi from linear weighted average
+                chi = ww*chiPN + (1.0-ww)*chiPS;
                 // ---------------------------------------
                 // binary first derivative
                 // ---------------------------------------
-                double df_c = (log(cc_fh) + 1.0)/N - log(1.0-cc_fh) - 1.0 + chiPS_diff*(1.0-2.0*cc_fh);
-					 // negative concentrations...
+                double df_c = (log(cc_fh) + 1.0)/N - log(1.0-cc_fh) - 1.0 + chi*(1.0-2.0*cc_fh);
+				// negative concentrations...
                 if (cc <= 0.0) df_c = -1.5*A*sqrt(-cc);
                 double lap_c = c.Laplacian(ndx);
+                double lap_w = w.Laplacian(ndx);
                 mu_c.setValue(ndx,df_c - kap*lap_c);
-	 	          // --------------------------------------------------------
+                mu_w.setValue(ndx,lap_w);
+	 	        // --------------------------------------------------------
                 // polymer self diffusion (Phillies) and 2nd Derivative FH
                 // --------------------------------------------------------
-		          double cc_phil = philliesDiffusion(cc);
+		        double cc_phil = philliesDiffusion(cc);
                 double ddf_c = secondDerFH(cc);	
-	             ddf_c *= kT;
-                Dc = D0;
-				    double Dp = Dc * exp (- gamma * pow(cc_phil,nu));	
+	            ddf_c *= kT;
+                double Dp = D0 * exp (- gamma * pow(cc_phil,nu));	
+                // -------------------------
+                // nonsolvent diffusion
+                // --------------------------
+                double Dpw = DNS * exp ( - gammaNS * pow(cc_phil,nuNS));
+                D_w.setValue(ndx,Dpw);
                 // ----------------------
                 // mobility
                 // ----------------------
                 double Mc = Dp/ddf_c;
-                //
-                // removing artifical mobility scaling
-                //
-                double waterFraction = (water_diff)/(water_CB);
-                // double chiFraction = (chiPS_diff-chiPS)/(chiPN - chiPS);
-               // double mobScale = 0.95 + 0.25 * log(1.0225 - chiFraction); // log scaling
-                double waterScale = 0.95 + 0.25*log(1.0225 - waterFraction);  
-                // polymer concentration causing vitrification?
-                // if (cc >= 0.75) 
-                //double mobScale = 1.0 - chiFraction; // linear scaling
                 if (Mc > 1.0) Mc = 1.0;     // making mobility max = 1
-   	          else if (Mc < 0.0) Mc = 1e-12;
-	             Mc *= mobReSize;//*waterScale;
-                if (mobilityDamper == 1) Mc *= waterScale;
-	             // Mc *= mobScale;
-                if (cc >= phiCutoff) Mc *= 1e-3;
+   	            else if (Mc < 0.0) Mc = 1e-12;
+	            Mc *= mobReSize;
+                if (cc >= phiCutoff) Mc *= 1e-6;
                 mob_c.setValue(ndx,Mc);
             }
         }
@@ -229,35 +186,30 @@ void SIPS::updatePhaseField()
 
     mu_c.updateBoundaries(bx,by,bz);
     mob_c.updateBoundaries(bx,by,bz);
+    mu_w.updateBoundaries(bx,by,bz);
+    D_w.updateBoundaries(bx,by,bz);
 
     MPI::COMM_WORLD.Barrier();
 
     c += p.dt*(mu_c.Laplacian(mob_c)); 
-
+    w += p.dt*DNS*mu_w/*(mu_w.Laplacian(D_w)*/;
 
  
 
     // ---------------------------------------
-    // Add random fluctuations:
+    // Add random fluctuations: set coagulation bath composition
     // ---------------------------------------
-	 //waterD = 0;   
-	 //double c_check = 0.0;
-	 double val = 0.0;
+    double val = 0;
     for (int i=1; i<nx+1; i++) {
-        //waterD = i + p.xOff - 1;    // counter for water depth
         for (int j=1; j<ny+1; j++) {
             for (int k=1; k<nz+1; k++) {
                 int ndx = i*deli + j*delj + k*delk;
+                if (i == 1) w.setValue(ndx,water_CB);
                 double r = (double)rand()/RAND_MAX;
                 double c_check = c.getValue(ndx);
                 if (c_check < 0) val =0;
                 else if (c_check >= phiCutoff) val = 0;
-                else val = c_check*(phiCutoff - c_check)*noiseStr*(r-0.5);
-                //val *= noiseStr*(r-0.5);   
-                //if (c_check >= 1.0) val = 0.0;
-                /*else if (c_check < phiCutoff)*/
-                //if (waterD > NSdepth) c.addValue(ndx,p.dt*val); 
-                // ¡¡¡nan issue!!! 
+                else val = noiseStr*(r-0.5);
                 // dont want noise added to water bath...
                 c.addValue(ndx,p.dt*val);
             }
@@ -315,6 +267,6 @@ void SIPS::outputPhaseField()
     int jskip = p.jskip;
     int kskip = p.kskip;
     c.writeVTKFile("c",current_step,iskip,jskip,kskip);
-//    chi.writeVTKFile("chi",current_step,iskip,jskip,kskip);
+    w.writeVTKFile("w",current_step,iskip,jskip,kskip);
 //    n.writeVTKFile("n",current_step,iskip,jskip,kskip);
 }
