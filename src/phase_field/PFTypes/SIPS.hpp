@@ -30,13 +30,10 @@ private:
     int nxyz;
     int outAnalysisInterval;
     int numAnalysisOutputs;
-    SfieldFD n;             // non-solvent (water) concentration (1)
-    SfieldFD s;				 // solvent concentration;  (2)
     SfieldFD c;             // polymer concentration (3)
-    SfieldFD chi;
+    SfieldFD w;             // non-solvent (water) concentration (1)
     double dt;
     double co;
-    double chiCond;
     double water_CB;
     double phiCutoff;
     double chiPS;
@@ -47,17 +44,17 @@ private:
     double A;
     double Tbath;
     double Tinit;
-    double Tcrystal;
     double noiseStr;
-    double thermCond;
     double gamma;
     double nu;
+    double gammaNS;
+    double nuNS;
     double D0;
+    double DNS;
     double Mweight;
     double Mvolume;
     double mobReSize;
     bool bx,by,bz;
-    bool mobilityDamper;
 public:
 
     SIPS(const CommonParams&, const GetPot&);
